@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 	"k8s.io/klog"
 
@@ -39,6 +40,8 @@ func (w *wireguard) GetConnections() (*[]v1.Connection, error) {
 
 		connections = append(connections, *connection.DeepCopy())
 	}
+
+	wireguardConnectedEndpoints.Set(float64(len(d.Peers)))
 
 	return &connections, nil
 }
@@ -92,7 +95,7 @@ func (w *wireguard) updateConnectionForPeer(p *wgtypes.Peer, connection *v1.Conn
 	if tx > 0 || rx > 0 {
 		// all is good
 		connection.SetStatus(v1.Connected, "Rx=%d Bytes, Tx=%d Bytes", p.ReceiveBytes, p.TransmitBytes)
-		savePeerTraffic(connection, now, p.TransmitBytes, p.ReceiveBytes)
+		saveAndExportPeerTraffic(connection, now, p.TransmitBytes, p.ReceiveBytes)
 
 		return
 	}
@@ -141,9 +144,24 @@ func peerTrafficDelta(c *v1.Connection, key string, newVal int64) int64 {
 	return 0
 }
 
-// Save backendConfig[key]
-func savePeerTraffic(c *v1.Connection, lc, tx, rx int64) {
+// Save backendConfig[key] and export the metrics to prometheus
+func saveAndExportPeerTraffic(c *v1.Connection, lc, tx, rx int64) {
 	c.Endpoint.BackendConfig[lastChecked] = strconv.FormatInt(lc, 10)
 	c.Endpoint.BackendConfig[transmitBytes] = strconv.FormatInt(tx, 10)
 	c.Endpoint.BackendConfig[receiveBytes] = strconv.FormatInt(rx, 10)
+
+	endpointLabels := getLabelsFromEndpoint(&c.Endpoint)
+	timeCreated, _ := strconv.ParseInt(c.Endpoint.BackendConfig[timeCreated], 10, 64)
+	timeAlive := float64((time.Now().UnixNano() - timeCreated) / int64(time.Second))
+
+	wireguardRxGaugeVec.With(endpointLabels).Set(float64(rx))
+	wireguardTxGaugeVec.With(endpointLabels).Set(float64(tx))
+	wireguardConnectionLifetimeGaugeVec.With(endpointLabels).Set(timeAlive)
+}
+
+func getLabelsFromEndpoint(e *v1.EndpointSpec) prometheus.Labels {
+	return prometheus.Labels{"dst_clusterID": e.ClusterID,
+		"dst_EndPoint_hostname": e.Hostname, "dst_PrivateIP": e.PrivateIP,
+		"dst_PublicIP": e.PublicIP, "Backend": e.Backend,
+	}
 }

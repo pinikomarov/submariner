@@ -5,22 +5,62 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/kelseyhightower/envconfig"
-
-	v1 "github.com/submariner-io/submariner/pkg/apis/submariner.io/v1"
-
-	"github.com/submariner-io/admiral/pkg/log"
-	"github.com/submariner-io/submariner/pkg/cable"
-	"github.com/submariner-io/submariner/pkg/types"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/vishvananda/netlink"
-
-	"k8s.io/klog"
-
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+	"k8s.io/klog"
+
+	"github.com/submariner-io/admiral/pkg/log"
+	v1 "github.com/submariner-io/submariner/pkg/apis/submariner.io/v1"
+	"github.com/submariner-io/submariner/pkg/cable"
+	"github.com/submariner-io/submariner/pkg/types"
+)
+
+var wireguardConnectedEndpoints = prometheus.NewGauge(prometheus.GaugeOpts{
+	Name: "wireguard_connected_endpoints",
+	Help: "wireguard connected endpoints",
+})
+
+var endpointLabels = []string{
+	// destination clusterID
+	"dst_clusterID",
+	// destination Endpoint hostname
+	"dst_EndPoint_hostname",
+	// destination PrivateIP
+	"dst_PrivateIP",
+	// destination PublicIP
+	"dst_PublicIP",
+	// Backend
+	"Backend",
+}
+
+var wireguardConnectionLifetimeGaugeVec = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Name: "wireguard_connection_lifetime",
+		Help: "wireguard connection lifetime in seconds",
+	},
+	endpointLabels,
+)
+
+var wireguardTxGaugeVec = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Name: "wireguard_tx_bytes",
+		Help: "Bytes transmitted",
+	},
+	endpointLabels,
+)
+var wireguardRxGaugeVec = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Name: "wireguard_rx_bytes",
+		Help: "Bytes received",
+	},
+	endpointLabels,
 )
 
 const (
@@ -40,6 +80,7 @@ const (
 	receiveBytes    = "ReceiveBytes"  // for peer connection status
 	transmitBytes   = "TransmitBytes" // for peer connection status
 	lastChecked     = "LastChecked"   // for connection peer status
+	timeCreated     = "TimeCreated"   // for connection time alive
 
 	// TODO use submariner prefix
 	specEnvPrefix = "ce_ipsec"
@@ -47,6 +88,7 @@ const (
 
 func init() {
 	cable.AddDriver(cableDriverName, NewDriver)
+	prometheus.MustRegister(wireguardRxGaugeVec, wireguardTxGaugeVec, wireguardConnectedEndpoints, wireguardConnectionLifetimeGaugeVec)
 }
 
 type specification struct {
@@ -268,6 +310,8 @@ func (w *wireguard) ConnectToEndpoint(remoteEndpoint types.SubmarinerEndpoint) (
 
 	klog.V(log.DEBUG).Infof("Done connecting endpoint peer %s@%s", *remoteKey, remoteIP)
 
+	connection.Endpoint.BackendConfig[timeCreated] = strconv.FormatInt(time.Now().UnixNano(), 10)
+
 	return ip, nil
 }
 
@@ -314,6 +358,12 @@ func (w *wireguard) DisconnectFromEndpoint(remoteEndpoint types.SubmarinerEndpoi
 	delete(w.connections, remoteEndpoint.Spec.ClusterID)
 
 	klog.V(log.DEBUG).Infof("Done removing endpoint for cluster %s", remoteEndpoint.Spec.ClusterID)
+
+	endpointLabels := getLabelsFromEndpoint(&remoteEndpoint.Spec)
+
+	wireguardRxGaugeVec.Delete(endpointLabels)
+	wireguardTxGaugeVec.Delete(endpointLabels)
+	wireguardConnectionLifetimeGaugeVec.Delete(endpointLabels)
 
 	return nil
 }
