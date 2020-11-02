@@ -66,13 +66,11 @@ fail if the CNI does SNAT before routing to Wireguard** (e.g., failed with Calic
 
 ## Monitoring
 
-the cabledriver
 The following metrics are exposed currently:
 
-- metrics that exposed per gateway:
-  - `wireguard_connected_endpoints` the number of connections.
 - metrics that exposed per connection:
-  - `wireguard_connection_lifetime` the wireguard connection lifetime in seconds.
-  - `wireguard_tx_bytes` Bytes transmitted for the connection.
-  - `wireguard_rx_bytes` Bytes received for the connection.
+  - `connection_activation_status` connection is connected/disconnected.represented as 1/0 respectively
+  - `connection_uptime_duration_seconds` connection uptime duration in seconds
+  - `connection_tx_bytes` Bytes transmitted to the connection
+  - `connection_rx_bytes` Bytes received from the connection
   
