@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog"
 
@@ -15,19 +18,29 @@ import (
 	v1 "github.com/submariner-io/submariner/pkg/apis/submariner.io/v1"
 	"github.com/submariner-io/submariner/pkg/cableengine"
 	v1typed "github.com/submariner-io/submariner/pkg/client/clientset/versioned/typed/submariner.io/v1"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 )
 
 type GatewaySyncer struct {
-	client  v1typed.GatewayInterface
-	engine  cableengine.Engine
-	version string
+	sync.Mutex
+	client      v1typed.GatewayInterface
+	engine      cableengine.Engine
+	version     string
+	statusError error
 }
 
 var GatewayUpdateInterval = 5 * time.Second
 var GatewayStaleTimeout = GatewayUpdateInterval * 3
 
+var gatewaySyncIterations = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "gateway_sync_iterations",
+	Help: "Gateway synchronization iterations",
+})
+
 const updateTimestampAnnotation = "update-timestamp"
+
+func init() {
+	prometheus.MustRegister(gatewaySyncIterations)
+}
 
 // NewEngine creates a new Engine for the local cluster
 func NewGatewaySyncer(engine cableengine.Engine, client v1typed.GatewayInterface,
@@ -49,7 +62,23 @@ func (s *GatewaySyncer) Run(stopCh <-chan struct{}) {
 }
 
 func (i *GatewaySyncer) syncGatewayStatus() {
+	i.Lock()
+	defer i.Unlock()
+
+	i.syncGatewayStatusSafe()
+}
+
+func (i *GatewaySyncer) SetGatewayStatusError(err error) {
+	i.Lock()
+	defer i.Unlock()
+
+	i.statusError = err
+	i.syncGatewayStatusSafe()
+}
+
+func (i *GatewaySyncer) syncGatewayStatusSafe() {
 	klog.V(log.TRACE).Info("Running Gateway status sync")
+	gatewaySyncIterations.Inc()
 
 	gatewayObj := i.generateGatewayObject()
 
@@ -157,9 +186,18 @@ func (i *GatewaySyncer) generateGatewayObject() *v1.Gateway {
 
 	gateway.Status.HAStatus = i.engine.GetHAStatus()
 
-	connections, err := i.engine.ListCableConnections()
-	if err != nil {
-		gateway.Status.StatusFailure = fmt.Sprintf("Error retrieving driver connections: %s", err)
+	var connections *[]v1.Connection
+
+	if i.statusError != nil {
+		gateway.Status.StatusFailure = i.statusError.Error()
+	} else {
+		var err error
+		connections, err = i.engine.ListCableConnections()
+		if err != nil {
+			msg := fmt.Sprintf("Error retrieving driver connections: %s", err)
+			klog.Errorf(msg)
+			gateway.Status.StatusFailure = msg
+		}
 	}
 
 	if connections != nil {

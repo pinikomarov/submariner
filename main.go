@@ -3,26 +3,29 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/kelseyhightower/envconfig"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/submariner-io/admiral/pkg/log"
+	admUtil "github.com/submariner-io/admiral/pkg/util"
+	subv1 "github.com/submariner-io/submariner/pkg/apis/submariner.io/v1"
 	"github.com/submariner-io/submariner/pkg/cable"
 	"github.com/submariner-io/submariner/pkg/cableengine"
 	"github.com/submariner-io/submariner/pkg/cableengine/syncer"
 	submarinerClientset "github.com/submariner-io/submariner/pkg/client/clientset/versioned"
-	submarinerInformers "github.com/submariner-io/submariner/pkg/client/informers/externalversions"
 	"github.com/submariner-io/submariner/pkg/controllers/datastoresyncer"
 	"github.com/submariner-io/submariner/pkg/controllers/tunnel"
-	"github.com/submariner-io/submariner/pkg/datastore"
-	subk8s "github.com/submariner-io/submariner/pkg/datastore/kubernetes"
 	"github.com/submariner-io/submariner/pkg/types"
 	"github.com/submariner-io/submariner/pkg/util"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -69,6 +72,8 @@ func main() {
 	// set up signals so we handle the first shutdown signal gracefully
 	stopCh := signals.SetupSignalHandler()
 
+	httpServer := startHttpServer()
+
 	var submSpec types.SubmarinerSpecification
 	err := envconfig.Process("submariner", &submSpec)
 	if err != nil {
@@ -85,17 +90,11 @@ func main() {
 		klog.Fatalf("Error creating submariner clientset: %s", err.Error())
 	}
 
-	submarinerInformerFactory := submarinerInformers.NewSharedInformerFactoryWithOptions(submarinerClient, time.Second*30,
-		submarinerInformers.WithNamespace(submSpec.Namespace))
-
 	var localSubnets []string
 
 	klog.Info("Creating the cable engine")
 
-	localCluster, err := util.GetLocalCluster(submSpec)
-	if err != nil {
-		klog.Fatalf("Error creating local cluster object from %#v: %v", submSpec, err)
-	}
+	localCluster := submarinerClusterFrom(&submSpec)
 
 	if len(submSpec.GlobalCidr) > 0 {
 		localSubnets = submSpec.GlobalCidr
@@ -117,11 +116,7 @@ func main() {
 		klog.Fatalf("Error creating local endpoint object from %#v: %v", submSpec, err)
 	}
 
-	cableEngine, err := cableengine.NewEngine(localCluster, localEndpoint)
-
-	if err != nil {
-		klog.Fatalf("Fatal error occurred creating engine: %v", err)
-	}
+	cableEngine := cableengine.NewEngine(localCluster, localEndpoint)
 
 	cableEngineSyncer := syncer.NewGatewaySyncer(
 		cableEngine,
@@ -130,35 +125,28 @@ func main() {
 
 	cableEngineSyncer.Run(stopCh)
 
+	err = subv1.AddToScheme(scheme.Scheme)
+	if err != nil {
+		fatal(cableEngineSyncer, "Error adding submariner types to the scheme: %v", err)
+	}
+
+	restMapper, err := admUtil.BuildRestMapper(cfg)
+	if err != nil {
+		fatal(cableEngineSyncer, err.Error())
+	}
+
+	dynClient, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		fatal(cableEngineSyncer, "error creating dynamic client: %v", err)
+	}
+
 	becameLeader := func(context.Context) {
-		klog.Info("Creating the tunnel controller")
-
-		tunnelController := tunnel.NewController(cableEngine, submarinerInformerFactory.Submariner().V1().Endpoints())
-
-		var datastore datastore.Datastore
-
-		switch submSpec.Broker {
-		case "k8s":
-			klog.Info("Creating the kubernetes central datastore")
-
-			datastore, err = subk8s.NewDatastore(submSpec.ClusterID, stopCh)
-			if err != nil {
-				klog.Fatalf("Error creating the kubernetes datastore: %v", err)
-			}
-		default:
-			klog.Fatalf("Invalid backend %q was specified", submSpec.Broker)
-		}
-
 		klog.Info("Creating the datastore syncer")
 
-		dsSyncer := datastoresyncer.NewDatastoreSyncer(submSpec.ClusterID, submarinerClient.SubmarinerV1().Clusters(submSpec.Namespace),
-			submarinerInformerFactory.Submariner().V1().Clusters(), submarinerClient.SubmarinerV1().Endpoints(submSpec.Namespace),
-			submarinerInformerFactory.Submariner().V1().Endpoints(), datastore, submSpec.ColorCodes, localCluster, localEndpoint)
-
-		submarinerInformerFactory.Start(stopCh)
+		dsSyncer := datastoresyncer.New(cfg, submSpec.Namespace, localCluster, localEndpoint, submSpec.ColorCodes)
 
 		if err = cableEngine.StartEngine(); err != nil {
-			klog.Fatalf("Error starting the cable engine: %v", err)
+			fatal(cableEngineSyncer, "Error starting the cable engine: %v", err)
 		}
 
 		var wg sync.WaitGroup
@@ -168,8 +156,8 @@ func main() {
 		go func() {
 			defer wg.Done()
 
-			if err = tunnelController.Run(stopCh); err != nil {
-				klog.Fatalf("Error running the tunnel controller: %v", err)
+			if err = tunnel.StartController(cableEngine, submSpec.Namespace, dynClient, restMapper, scheme.Scheme, stopCh); err != nil {
+				fatal(cableEngineSyncer, "Error running the tunnel controller: %v", err)
 			}
 		}()
 
@@ -177,7 +165,7 @@ func main() {
 			defer wg.Done()
 
 			if err = dsSyncer.Run(stopCh); err != nil {
-				klog.Fatalf("Error running the datastore syncer: %v", err)
+				fatal(cableEngineSyncer, "Error running the datastore syncer: %v", err)
 			}
 		}()
 
@@ -186,30 +174,66 @@ func main() {
 
 	leClient, err := kubernetes.NewForConfig(rest.AddUserAgent(cfg, "leader-election"))
 	if err != nil {
-		klog.Fatalf("Error creating leader election kubernetes clientset: %s", err.Error())
+		fatal(cableEngineSyncer, "Error creating leader election kubernetes clientset: %s", err)
 	}
 
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartLogging(klog.V(log.DEBUG).Infof)
-	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "submariner-controller"})
+	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "submariner-controller"})
 
 	lostLeader := func() {
 		cableEngineSyncer.CleanupGatewayEntry()
 		klog.Fatalf("Leader election lost, shutting down")
 	}
 
-	go startLeaderElection(leClient, recorder, becameLeader, lostLeader)
+	go func() {
+		if err = startLeaderElection(leClient, recorder, becameLeader, lostLeader); err != nil {
+			fatal(cableEngineSyncer, "Error starting leader election: %v", err)
+		}
+	}()
+
 	<-stopCh
 	klog.Info("All controllers stopped or exited. Stopping main loop")
+
+	if err := httpServer.Shutdown(context.TODO()); err != nil {
+		klog.Errorf("Error shutting down metrics HTTP server: %v", err)
+	}
+}
+
+func submarinerClusterFrom(submSpec *types.SubmarinerSpecification) types.SubmarinerCluster {
+	return types.SubmarinerCluster{
+		ID: submSpec.ClusterID,
+		Spec: subv1.ClusterSpec{
+			ClusterID:   submSpec.ClusterID,
+			ColorCodes:  submSpec.ColorCodes,
+			ServiceCIDR: submSpec.ServiceCidr,
+			ClusterCIDR: submSpec.ClusterCidr,
+			GlobalCIDR:  submSpec.GlobalCidr,
+		},
+	}
+}
+
+func startHttpServer() *http.Server {
+	srv := &http.Server{Addr: ":8080"}
+
+	http.Handle("/metrics", promhttp.Handler())
+
+	go func() {
+		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+			klog.Errorf("Error starting metrics server: %v", err)
+		}
+	}()
+
+	return srv
 }
 
 func startLeaderElection(leaderElectionClient kubernetes.Interface, recorder resourcelock.EventRecorder,
-	run func(ctx context.Context), end func()) {
+	run func(ctx context.Context), end func()) error {
 	gwLeadershipConfig := leaderConfig{}
 
 	err := envconfig.Process(leadershipConfigEnvPrefix, &gwLeadershipConfig)
 	if err != nil {
-		klog.Fatalf("Error processing environment config for %s: %v", leadershipConfigEnvPrefix, err)
+		return fmt.Errorf("Error processing environment config for %s: %v", leadershipConfigEnvPrefix, err)
 	}
 
 	// Use default values when GatewayLeadership environment variables are not configured
@@ -229,7 +253,7 @@ func startLeaderElection(leaderElectionClient kubernetes.Interface, recorder res
 
 	id, err := os.Hostname()
 	if err != nil {
-		klog.Fatalf("Error getting hostname: %v", err)
+		return fmt.Errorf("Error getting hostname: %v", err)
 	}
 
 	kubeconfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
@@ -268,4 +292,12 @@ func startLeaderElection(leaderElectionClient kubernetes.Interface, recorder res
 			OnStoppedLeading: end,
 		},
 	})
+
+	return nil
+}
+
+func fatal(gwSyncer *syncer.GatewaySyncer, format string, args ...interface{}) {
+	err := fmt.Errorf(format, args...)
+	gwSyncer.SetGatewayStatusError(err)
+	klog.Fatal(err.Error())
 }
