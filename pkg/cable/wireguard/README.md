@@ -66,11 +66,13 @@ fail if the CNI does SNAT before routing to Wireguard** (e.g., failed with Calic
 
 ## Monitoring
 
+the cabledriver
 The following metrics are exposed currently:
 
-- metrics that exposed per connection:
+- metrics that exposed per gateway:
   - `connection_activation_status` connection is connected/disconnected.represented as 1/0 respectively
-  - `connection_uptime_duration_seconds` connection uptime duration in seconds
-  - `connection_tx_bytes` Bytes transmitted to the connection
-  - `connection_rx_bytes` Bytes received from the connection
+   (by cable driver and cable).
+  - `connection_established_timestamp` the Unix timestamp at which the connection established.
+  - `gateway_tx_bytes` Bytes transmitted for the connection.
+  - `gateway_rx_bytes` Bytes received for the connection.
   
