@@ -41,8 +41,8 @@ Currently assuming Linux Kernel WireGuard (`wgtypes.LinuxKernel`).
   ```
 
 - The default UDP listen port for submariner WireGuard driver is `4500`. It can be changed by setting the env var `CE_IPSEC_NATTPORT`
-- We assumes that the wireguard network device named `submariner` is exclusively
- used by submariner-gateway and should not be edited manually.
+- It is assumed that the wireguard network device named `submariner` is exclusively used by submariner-gateway
+ and should not be edited manually.
 
 ## Troubleshooting, limitations
 
@@ -66,13 +66,10 @@ fail if the CNI does SNAT before routing to Wireguard** (e.g., failed with Calic
 
 ## Monitoring
 
-the cabledriver
-The following metrics are exposed currently:
+The following metrics are exposed per gateway:
 
-- metrics that exposed per gateway:
-  - `connection_activation_status` connection is connected/disconnected.represented as 1/0 respectively
-   (by cable driver and cable).
-  - `connection_established_timestamp` the Unix timestamp at which the connection established.
-  - `gateway_tx_bytes` Bytes transmitted for the connection.
-  - `gateway_rx_bytes` Bytes received for the connection.
+- `connection_status`: indicates whether or not the connection is established where the value 1 means connected and 0 means disconnected.
+- `connection_established_timestamp` the Unix timestamp at which the connection established.
+- `gateway_tx_bytes` Bytes transmitted for the connection.
+- `gateway_rx_bytes` Bytes received for the connection.
   
