@@ -1,4 +1,5 @@
 FROM fedora:33
+ARG TARGETPLATFORM
 
 RUN dnf -y install --nodocs git-core 'dnf-command(builddep)' rpm-build
 
@@ -14,6 +15,7 @@ RUN make -C libreswan git-rpm
 FROM fedora:33
 
 WORKDIR /var/submariner
+ARG TARGETPLATFORM
 
 # iproute and iptables are used internally
 # libreswan or strongswan provide IKE
@@ -27,7 +29,7 @@ COPY --from=0 /root/rpmbuild/RPMS/x86_64/* /root/
 RUN dnf -y install /root/*.rpm && \
     dnf -y clean all && \
     rm -f /root/*.rpm
-COPY package/submariner.sh package/pluto bin/submariner-engine /usr/local/bin/
+COPY package/submariner.sh package/pluto bin/${TARGETPLATFORM}/submariner-engine /usr/local/bin/
 
 # Wrapper scripts to use iptables from the host when that's available
 COPY package/iptables-wrapper.in /usr/sbin/
