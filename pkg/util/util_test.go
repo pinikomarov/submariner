@@ -68,9 +68,9 @@ func testFlattenColors() {
 
 func testGetLocalEndpoint() {
 	It("should return a valid SubmarinerEndpoint object", func() {
-		subnets := []string{"1.2.3.4/16"}
-		privateIP := "1.2.3.4"
-		endpoint, err := util.GetLocalEndpoint("east", "backend", map[string]string{}, false, subnets, privateIP)
+		subnets := []string{"127.0.0.1/16"}
+		privateIP := "127.0.0.1"
+		endpoint, err := util.GetLocalEndpoint("east", "backend", map[string]string{}, false, subnets, privateIP, subnets)
 
 		Expect(err).ToNot(HaveOccurred())
 		Expect(endpoint.Spec.ClusterID).To(Equal("east"))
@@ -195,6 +195,23 @@ func testCompareEndpointSpec() {
 					Hostname:      "my-host",
 					Backend:       "strongswan",
 					BackendConfig: map[string]string{"key": "aaa"},
+				})).To(BeTrue())
+		})
+
+		It("should return true", func() {
+			Expect(util.CompareEndpointSpec(
+				subv1.EndpointSpec{
+					ClusterID:     "east",
+					CableName:     "submariner-cable-east-172-16-32-5",
+					Hostname:      "my-host",
+					Backend:       "strongswan",
+					BackendConfig: map[string]string{},
+				},
+				subv1.EndpointSpec{
+					ClusterID: "east",
+					CableName: "submariner-cable-east-172-16-32-5",
+					Hostname:  "my-host",
+					Backend:   "strongswan",
 				})).To(BeTrue())
 		})
 	})
